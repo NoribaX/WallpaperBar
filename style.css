@@ -1,0 +1,114 @@
+#wrapper {
+    background: transparent;
+}
+
+QScrollArea, QScrollArea > QWidget {
+    background: transparent;
+    border: none;
+}
+
+#central_widget {
+    background-color: rgba(20, 20, 25, 0.88);
+    border-radius: 20px;
+    border-bottom-left-radius: 20px;
+    border-bottom-right-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Remove all default system focus borders and frames */
+QPushButton {
+    background: transparent;
+    outline: none;
+    border: none;
+    border-radius: 12px; 
+}
+
+QPushButton:checked, QPushButton:focus, QPushButton:hover, QPushButton:pressed {
+    background: transparent;
+    outline: none;
+    border: none;
+}
+
+/* Add button */
+#add_button {
+    font-size: 60px; 
+    font-weight: 200; 
+}
+
+#add_button:hover {
+    background-color: rgb(0, 0, 0); 
+    border: 2px dashed rgba(0, 0, 0, 0); 
+    color: rgba(255, 255, 255, 1); 
+}
+
+#add_button:pressed {
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* Video wallpapers use a cached still frame when one is available. */
+#video_wallpaper_btn {
+    color: rgba(255, 255, 255, 0.72);
+    font-family: "Segoe UI";
+    font-size: 12px;
+    font-weight: 500;
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    padding: 0px;
+}
+
+#video_wallpaper_btn:hover, #video_wallpaper_btn:checked {
+    background-color: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* Help button ? */
+#help_button {
+    font-size: 20px;
+    font-weight: 300;
+    color: rgba(255, 255, 255, 0.4);
+    background-color: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    outline: none;
+}
+
+#help_button:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.95);
+}
+
+#help_button:focus {
+    outline: none;
+}
+
+/* Popup shortcut cards and lists */
+#dialog_card {
+    background-color: rgba(20, 20, 25, 0.95);
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+#dialog_title {
+    font-size: 16px;
+    font-weight: bold;
+    color: #FFFFFF;
+    margin-bottom: 8px;
+}
+
+#close_dialog_btn {
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #FFFFFF;
+    padding: 8px 26px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-top: 10px;
+    outline: none;
+}
+
+#close_dialog_btn:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
