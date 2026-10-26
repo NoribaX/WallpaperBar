@@ -3,6 +3,8 @@ import sys
 import ctypes
 import hashlib
 import json
+import threading
+import time
 import keyboard
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtCore import (
@@ -97,16 +99,22 @@ class WallpaperBar(QMainWindow):
     hotkey_show = Signal()
     video_start_failed = Signal(str)
     video_start_succeeded = Signal()
+    video_delete_completed = Signal(object, str, str)
 
     def __init__(self):
         super().__init__()
         self.video_engine = VideoWallpaperEngine()
         self._init_video_thumbnails()
         self._video_start_in_progress = False
+        self._video_delete_in_progress = False
+        self._deferred_video_deletions = {}
         self._pending_video_wallpaper_path = None
         self._silent_video_start = False
+        self._hide_bar_after_video_start = True
+        self._active_video_wallpaper_path = None
         self.video_start_failed.connect(self._show_video_error)
         self.video_start_succeeded.connect(self._on_video_start_succeeded)
+        self.video_delete_completed.connect(self._on_video_delete_completed)
 
         # 1. Dynamic program paths
         app_data_dir = os.path.join(
@@ -157,7 +165,6 @@ class WallpaperBar(QMainWindow):
         self.load_wallpapers()
         self.resize(900, 250)
         self.recenter()
-        self._add_to_startup()
 
     def _save_last_wallpaper(self, file_path, wallpaper_type):
         config = {
@@ -200,6 +207,64 @@ class WallpaperBar(QMainWindow):
             wallpaper_type = "video" if extension in (".mp4", ".webm") else "image"
         return {"path": file_path, "type": wallpaper_type}
 
+    def _clear_last_wallpaper_if_matches(self, file_path):
+        state = self._read_last_wallpaper()
+        if state is None:
+            return
+        if os.path.normcase(state["path"]) != os.path.normcase(os.path.abspath(file_path)):
+            return
+        try:
+            os.remove(self.config_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[WallpaperBar] Could not clear deleted wallpaper state: {exc}",
+                  file=sys.stderr, flush=True)
+
+    def _defer_video_file_deletion(self, file_path):
+        full_path = os.path.abspath(file_path)
+        self._deferred_video_deletions[os.path.normcase(full_path)] = full_path
+
+    def _cancel_deferred_video_deletion(self, file_path):
+        key = os.path.normcase(os.path.abspath(file_path))
+        self._deferred_video_deletions.pop(key, None)
+
+    def _has_other_wallpaper_reference(self, file_path, excluded_button):
+        target = os.path.normcase(os.path.abspath(file_path))
+        for index in range(self.main_layout.count()):
+            button = self.main_layout.itemAt(index).widget()
+            if button is None or button is excluded_button:
+                continue
+            candidate = getattr(button, "video_path", None)
+            if candidate and os.path.normcase(os.path.abspath(candidate)) == target:
+                return True
+        return False
+
+    def _finalize_deferred_video_deletions(self):
+        """Delete videos removed from the bar after the engine has stopped."""
+        for key, file_path in list(self._deferred_video_deletions.items()):
+            try:
+                os.remove(file_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"[WallpaperBar] Deferred video deletion will retry later: {exc}",
+                      file=sys.stderr, flush=True)
+                continue
+            self._deferred_video_deletions.pop(key, None)
+            self._clear_last_wallpaper_if_matches(file_path)
+
+    def shutdown_video_engine(self):
+        """Stop playback, then release any video files queued for deletion."""
+        try:
+            self.video_engine.stop()
+        except Exception as exc:
+            print(f"[WallpaperBar] Could not stop video engine cleanly: {exc}",
+                  file=sys.stderr, flush=True)
+            return
+        self._active_video_wallpaper_path = None
+        self._finalize_deferred_video_deletions()
+
     def restore_last_wallpaper(self):
         """Apply the saved wallpaper without showing the selection bar."""
         state = self._read_last_wallpaper()
@@ -232,6 +297,7 @@ class WallpaperBar(QMainWindow):
         self._video_thumbnail_sink = None
         self._video_thumbnail_queue = []
         self._video_thumbnail_target = None
+        self._video_thumbnail_source_path = None
         self._video_thumbnail_cache_file = None
         self._video_thumbnail_play_requested = False
         self._video_thumbnail_player = None
@@ -311,6 +377,7 @@ class WallpaperBar(QMainWindow):
             # Clear the previous URL first. Re-adding the same video can reuse
             # the identical URL, which Qt may otherwise leave in its old stopped state.
             self._video_thumbnail_player.setSource(QUrl())
+            self._video_thumbnail_source_path = None
             QTimer.singleShot(
                 0,
                 lambda target=button: self._load_video_thumbnail_source(target),
@@ -320,6 +387,7 @@ class WallpaperBar(QMainWindow):
     def _load_video_thumbnail_source(self, button):
         if (button is self._video_thumbnail_target
                 and os.path.isfile(button.video_path)):
+            self._video_thumbnail_source_path = os.path.abspath(button.video_path)
             self._video_thumbnail_player.setSource(
                 QUrl.fromLocalFile(button.video_path)
             )
@@ -347,6 +415,8 @@ class WallpaperBar(QMainWindow):
         self._video_thumbnail_cache_file = None
         self._video_thumbnail_play_requested = False
         self._video_thumbnail_player.stop()
+        self._video_thumbnail_player.setSource(QUrl())
+        self._video_thumbnail_source_path = None
         QTimer.singleShot(0, self._start_next_video_thumbnail)
 
     def _on_video_thumbnail_frame(self, frame):
@@ -369,6 +439,8 @@ class WallpaperBar(QMainWindow):
         self._video_thumbnail_cache_file = None
         self._video_thumbnail_play_requested = False
         self._video_thumbnail_player.stop()
+        self._video_thumbnail_player.setSource(QUrl())
+        self._video_thumbnail_source_path = None
         if cache_file:
             image.save(cache_file, "JPEG", 82)
         QTimer.singleShot(0, self._start_next_video_thumbnail)
@@ -380,12 +452,20 @@ class WallpaperBar(QMainWindow):
         self._video_thumbnail_play_requested = False
         if self._video_thumbnail_player is not None:
             self._video_thumbnail_player.stop()
+            self._video_thumbnail_player.setSource(QUrl())
+            self._video_thumbnail_source_path = None
         if button is not None and requeue:
             self._video_thumbnail_queue.insert(0, button)
 
     def _discard_video_thumbnail(self, button, remove_cache=True):
         if button is self._video_thumbnail_target:
             self._stop_video_thumbnail_capture(requeue=False)
+        elif (self._video_thumbnail_source_path
+              and os.path.normcase(self._video_thumbnail_source_path)
+              == os.path.normcase(os.path.abspath(getattr(button, "video_path", "")))):
+            self._video_thumbnail_player.stop()
+            self._video_thumbnail_player.setSource(QUrl())
+            self._video_thumbnail_source_path = None
         self._video_thumbnail_queue = [
             queued for queued in self._video_thumbnail_queue if queued is not button
         ]
@@ -505,6 +585,8 @@ class WallpaperBar(QMainWindow):
         self._discard_video_thumbnail(button)
         wallpaper_path = os.path.abspath(wallpaper_path)
         is_video = os.path.splitext(wallpaper_path)[1].lower() in ('.mp4', '.webm')
+        if is_video:
+            self._cancel_deferred_video_deletion(wallpaper_path)
         button.setCheckable(True)
         button.setAttribute(Qt.WA_TranslucentBackground, True)
         button.setToolTip(os.path.basename(wallpaper_path))
@@ -785,12 +867,13 @@ class WallpaperBar(QMainWindow):
 
             self.recenter()
 
-    def _start_video_wallpaper(self, video_path, silent=False):
-        if self._video_start_in_progress:
+    def _start_video_wallpaper(self, video_path, silent=False, hide_after_start=True):
+        if self._video_start_in_progress or self._video_delete_in_progress:
             return
         self._stop_video_thumbnail_capture()
         self._pending_video_wallpaper_path = os.path.abspath(video_path)
         self._silent_video_start = silent
+        self._hide_bar_after_video_start = hide_after_start
         try:
             monitors = self.video_engine.list_monitors()
             target = "all"
@@ -802,16 +885,20 @@ class WallpaperBar(QMainWindow):
                 if not accepted:
                     self._pending_video_wallpaper_path = None
                     self._silent_video_start = False
+                    self._hide_bar_after_video_start = True
                     return
                 if choice != "All monitors":
                     target = choice
 
             self.video_engine.stop()
+            self._active_video_wallpaper_path = None
+            self._finalize_deferred_video_deletions()
             self._video_start_in_progress = True
             self.central_widget.setEnabled(False)
             future = self.video_engine.start_async(video_path, monitor=target)
             future.add_done_callback(self._video_start_completed)
         except (OSError, VideoWallpaperError) as exc:
+            self._hide_bar_after_video_start = True
             self.video_start_failed.emit(str(exc))
 
     def _video_start_completed(self, future):
@@ -827,18 +914,26 @@ class WallpaperBar(QMainWindow):
     def _on_video_start_succeeded(self):
         self._video_start_in_progress = False
         self.central_widget.setEnabled(True)
+        hide_after_start = self._hide_bar_after_video_start
         if self._pending_video_wallpaper_path:
+            self._active_video_wallpaper_path = os.path.normcase(
+                os.path.abspath(self._pending_video_wallpaper_path)
+            )
             self._save_last_wallpaper(self._pending_video_wallpaper_path, "video")
         self._pending_video_wallpaper_path = None
         self._silent_video_start = False
-        self.hide_bar_animated()
+        self._hide_bar_after_video_start = True
+        if hide_after_start:
+            self.hide_bar_animated()
 
     def _show_video_error(self, message):
         silent = self._silent_video_start
         self._video_start_in_progress = False
         self.central_widget.setEnabled(True)
         self._pending_video_wallpaper_path = None
+        self._active_video_wallpaper_path = None
         self._silent_video_start = False
+        self._hide_bar_after_video_start = True
         if silent:
             print(f"[WallpaperBar] Could not restore live wallpaper: {message}",
                   file=sys.stderr, flush=True)
@@ -931,7 +1026,8 @@ class WallpaperBar(QMainWindow):
                 return
 
     def apply_wallpaper(self):
-        if self.selected_button is None or self._video_start_in_progress:
+        if (self.selected_button is None or self._video_start_in_progress
+                or self._video_delete_in_progress):
             return
 
         video_path = getattr(self.selected_button, "video_path", None)
@@ -946,6 +1042,8 @@ class WallpaperBar(QMainWindow):
                 self, "Could not stop the live wallpaper", str(exc)
             )
             return
+        self._active_video_wallpaper_path = None
+        self._finalize_deferred_video_deletions()
 
         image_path = self.selected_button.image_path
         if not ctypes.windll.user32.SystemParametersInfoW(20, 0, image_path, 3):
@@ -1033,7 +1131,8 @@ class WallpaperBar(QMainWindow):
     # --- Advanced Operations (Delete, Replace, Move) ---
 
     def delete_selected(self):
-        if self.selected_button is None or self._video_start_in_progress:
+        if (self.selected_button is None or self._video_start_in_progress
+                or self._video_delete_in_progress):
             return
 
         button = self.selected_button
@@ -1046,40 +1145,107 @@ class WallpaperBar(QMainWindow):
             return
 
         if getattr(button, "video_path", None):
-            try:
-                self.video_engine.stop()
-            except VideoWallpaperError as exc:
-                self.video_start_failed.emit(str(exc))
+            has_other_reference = self._has_other_wallpaper_reference(
+                wallpaper_path, button
+            )
+            # Do not stop or disturb a running desktop video just because its
+            # tile (or another video tile) is removed from the bar. Keep files
+            # queued until the engine is stopped by an explicit wallpaper
+            # change or application shutdown.
+            if self._active_video_wallpaper_path is not None:
+                if not has_other_reference:
+                    self._defer_video_file_deletion(wallpaper_path)
+                self._remove_wallpaper_button(button, index)
                 return
+            if has_other_reference:
+                self._remove_wallpaper_button(button, index)
+                return
+
+            self._video_delete_in_progress = True
+            button.setEnabled(False)
+            try:
+                threading.Thread(
+                    target=self._delete_video_worker,
+                    args=(button, wallpaper_path),
+                    name="WallpaperBar-delete-video",
+                    daemon=True,
+                ).start()
+            except RuntimeError as exc:
+                self._video_delete_in_progress = False
+                button.setEnabled(True)
+                QMessageBox.warning(self, "Could not delete live wallpaper", str(exc))
+            return
 
         try:
             os.remove(wallpaper_path)
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not delete wallpaper", str(exc))
+            return
+        self._clear_last_wallpaper_if_matches(wallpaper_path)
+        self._remove_wallpaper_button(button, index)
 
+    def _delete_video_worker(self, button, wallpaper_path):
+        error = ""
+        try:
+            # The thumbnail decoder can release its handle shortly after its
+            # source is cleared. Retry briefly for packaged Windows builds.
+            for attempt in range(15):
+                try:
+                    os.remove(wallpaper_path)
+                    break
+                except FileNotFoundError:
+                    break
+                except PermissionError:
+                    if attempt == 14:
+                        raise
+                    time.sleep(0.1)
+        except Exception as exc:
+            error = str(exc)
+        self.video_delete_completed.emit(button, wallpaper_path, error)
+
+    def _on_video_delete_completed(self, button, wallpaper_path, error):
+        self._video_delete_in_progress = False
+        button.setEnabled(True)
+        index = self.main_layout.indexOf(button)
+        if index < 0:
+            return
+        if error:
+            QMessageBox.warning(self, "Could not delete live wallpaper", error)
+            return
+
+        self._clear_last_wallpaper_if_matches(wallpaper_path)
+        self._remove_wallpaper_button(button, index)
+
+    def _remove_wallpaper_button(self, button, index):
+        was_selected = self.selected_button is button
         self.main_layout.removeWidget(button)
         button.hide()
         button.deleteLater()
-
-        self.selected_button = None
+        if was_selected:
+            self.selected_button = None
 
         self.recenter()
+        if self.selected_button is not None:
+            for layout_index in range(self.main_layout.count()):
+                if self.main_layout.itemAt(layout_index).widget() is self.selected_button:
+                    self.current_index = layout_index
+                    return
 
-        count = self.main_layout.count() - 2
-        if count == 0:
+        wallpaper_count = self.main_layout.count() - 2
+        if wallpaper_count <= 0:
             self.current_index = 0
             return
-
-        self.select_button(index)
-        if self.selected_button and self.selected_button.text() == "+":
-            self.select_button(index - 1)
+        self.select_button(min(index, wallpaper_count - 1))
 
     def _do_delete(self):
         if self.isActiveWindow() and self.selected_button is not None:
             self.delete_selected()
 
     def _do_replace(self):
-        if (self._video_start_in_progress or self.selected_button is None
+        if (self._video_start_in_progress or self._video_delete_in_progress
+                or self.selected_button is None
                 or self.selected_button.text() in ["+", "?"]):
             return
 
@@ -1244,59 +1410,16 @@ class WallpaperBar(QMainWindow):
             return False
 
     def _add_to_startup(self):
-        """Register the app to run at user logon, picking whichever
-        mechanism actually works for how this build was launched."""
-        if self._is_msix_packaged():
-            self._enable_msix_startup_task()
-        else:
-            self._add_to_startup_registry()
+        """Startup is controlled only by the Windows package setting."""
+        return
 
     def _add_to_startup_registry(self):
-        """Classic HKCU\\...\\Run entry. Only reliable for dev runs and
-        plain (non-MSIX) .exe distributions, e.g. a PyInstaller build
-        handed out directly or through a regular installer."""
-        import winreg
-        if getattr(sys, 'frozen', False):
-            app_path = sys.executable
-        else:
-            app_path = os.path.abspath(sys.argv[0])
-
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        app_name = "WallpaperBar"
-
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
-            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, f'"{app_path}"')
-            winreg.CloseKey(key)
-        except Exception:
-            pass
+        """Legacy hook retained as a no-op; never writes to global startup keys."""
+        return
 
     def _enable_msix_startup_task(self):
-        """
-        Turn on the StartupTask declared in AppxManifest.xml.
-        TaskId here MUST match <desktop:StartupTask TaskId="..."> in the
-        manifest (see AppxManifest.xml - "WallpaperBarStartupTask").
-        Needs `pip install winsdk` bundled into the build. If that package
-        isn't available this just does nothing - it never crashes the app,
-        the user can still flip it on manually from Settings > Apps > Startup.
-        """
-        try:
-            from winsdk.windows.applicationmodel import StartupTask, StartupTaskState
-        except ImportError:
-            return
-
-        async def _request():
-            task = await StartupTask.get_async("WallpaperBarStartupTask")
-            if task.state == StartupTaskState.DISABLED_BY_USER:
-                return  # user explicitly turned it off - respect that choice
-            if task.state == StartupTaskState.DISABLED:
-                await task.request_enable_async()
-
-        try:
-            import asyncio
-            asyncio.run(_request())
-        except Exception:
-            pass
+        """Legacy hook retained as a no-op; Windows owns StartupTask state."""
+        return
 
 
 # --- Application Entry Point ---
@@ -1331,7 +1454,7 @@ if __name__ == "__main__":
     server.listen(server_name)
 
     window = WallpaperBar()
-    app.aboutToQuit.connect(window.video_engine.stop)
+    app.aboutToQuit.connect(window.shutdown_video_engine)
 
     # Callback function when the user tries to open the app again from the icon
     def handle_client_connection():
