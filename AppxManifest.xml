@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap desktop rescap">
+
+  <!--
+    Identity: Name + Publisher together form the Microsoft Store package identity.
+    - Name: letters/digits/.- only, no spaces.
+    - Publisher: must match the Subject (CN=...) of the certificate you
+      sign the .msix with, character-for-character, or installation fails.
+    - Version: Major.Minor.Build.Revision - bump it on every release.
+  -->
+  <Identity
+    Name="NORIdev.WallpaperBarPro"
+    Publisher="CN=5360593F-F2DE-4A21-8F3E-C5D69A10EC8C"
+    Version="1.1.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>WallpaperBar Pro</DisplayName>
+    <PublisherDisplayName>NORI_dev</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!--
+      Executable must be the .exe name exactly as it sits at the root of
+      the package (i.e. the name you pass to PyInstaller's "name" option).
+      EntryPoint stays "Windows.FullTrustApplication" for a classic
+      desktop/Win32 app, do not change it.
+    -->
+    <Application Id="WallpaperBar" Executable="WallpaperBar.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="WallpaperBar Pro"
+        Description="A floating bar for quickly switching the desktop wallpaper"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+      </uap:VisualElements>
+
+      <Extensions>
+        <!--
+          This package declares one startup entry for WallpaperBar.exe.
+          Windows owns its enabled state; the app does not write startup
+          registry entries or change the state of any other app.
+        -->
+        <desktop:Extension Category="windows.startupTask" Executable="WallpaperBar.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="WallpaperBarStartupTask" Enabled="true" DisplayName="WallpaperBar Pro" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Required for any packaged classic Win32/desktop app (Desktop Bridge). -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
